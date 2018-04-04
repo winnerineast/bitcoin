@@ -10,6 +10,7 @@
 #include <qt/transactiontablemodel.h>
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
+#include <key_io.h>
 #include <test/test_bitcoin.h>
 #include <validation.h>
 #include <wallet/wallet.h>
@@ -154,19 +155,19 @@ void TestGUI()
     for (int i = 0; i < 5; ++i) {
         test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
     }
-    bitdb.MakeMock();
-    std::unique_ptr<CWalletDBWrapper> dbw(new CWalletDBWrapper(&bitdb, "wallet_test.dat"));
-    CWallet wallet(std::move(dbw));
+    CWallet wallet("mock", CWalletDBWrapper::CreateMock());
     bool firstRun;
     wallet.LoadWallet(firstRun);
     {
         LOCK(wallet.cs_wallet);
-        wallet.SetAddressBook(test.coinbaseKey.GetPubKey().GetID(), "", "receive");
+        wallet.SetAddressBook(GetDestinationForKey(test.coinbaseKey.GetPubKey(), wallet.m_default_address_type), "", "receive");
         wallet.AddKeyPubKey(test.coinbaseKey, test.coinbaseKey.GetPubKey());
     }
     {
         LOCK(cs_main);
-        wallet.ScanForWalletTransactions(chainActive.Genesis(), nullptr, true);
+        WalletRescanReserver reserver(&wallet);
+        reserver.reserve();
+        wallet.ScanForWalletTransactions(chainActive.Genesis(), nullptr, reserver, true);
     }
     wallet.SetBroadcastTransactions(true);
 
@@ -255,9 +256,6 @@ void TestGUI()
     QPushButton* removeRequestButton = receiveCoinsDialog.findChild<QPushButton*>("removeRequestButton");
     removeRequestButton->click();
     QCOMPARE(requestTableModel->rowCount({}), currentRowCount-1);
-
-    bitdb.Flush(true);
-    bitdb.Reset();
 }
 
 }

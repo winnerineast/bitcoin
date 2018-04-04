@@ -28,14 +28,16 @@
 
 #include <init.h>
 #include <rpc/server.h>
-#include <scheduler.h>
 #include <ui_interface.h>
+#include <uint256.h>
 #include <util.h>
 #include <warnings.h>
 
 #ifdef ENABLE_WALLET
+#include <wallet/init.h>
 #include <wallet/wallet.h>
 #endif
+#include <walletinitinterface.h>
 
 #include <stdint.h>
 
@@ -81,6 +83,7 @@ Q_IMPORT_PLUGIN(QCocoaIntegrationPlugin);
 // Declare meta types used for QMetaObject::invokeMethod
 Q_DECLARE_METATYPE(bool*)
 Q_DECLARE_METATYPE(CAmount)
+Q_DECLARE_METATYPE(uint256)
 
 static void InitMessage(const std::string &message)
 {
@@ -193,8 +196,6 @@ Q_SIGNALS:
     void runawayException(const QString &message);
 
 private:
-    boost::thread_group threadGroup;
-    CScheduler scheduler;
 
     /// Pass fatal exception message to UI thread
     void handleRunawayException(const std::exception *e);
@@ -252,7 +253,7 @@ private:
     QTimer *pollShutdownTimer;
 #ifdef ENABLE_WALLET
     PaymentServer* paymentServer;
-    WalletModel *walletModel;
+    std::vector<WalletModel*> m_wallet_models;
 #endif
     int returnValue;
     const PlatformStyle *platformStyle;
@@ -300,7 +301,7 @@ void BitcoinCore::initialize()
     try
     {
         qDebug() << __func__ << ": Running initialization in thread";
-        bool rv = AppInitMain(threadGroup, scheduler);
+        bool rv = AppInitMain();
         Q_EMIT initializeResult(rv);
     } catch (const std::exception& e) {
         handleRunawayException(&e);
@@ -314,8 +315,7 @@ void BitcoinCore::shutdown()
     try
     {
         qDebug() << __func__ << ": Running Shutdown in thread";
-        Interrupt(threadGroup);
-        threadGroup.join_all();
+        Interrupt();
         Shutdown();
         qDebug() << __func__ << ": Shutdown finished";
         Q_EMIT shutdownResult();
@@ -335,7 +335,7 @@ BitcoinApplication::BitcoinApplication(int &argc, char **argv):
     pollShutdownTimer(0),
 #ifdef ENABLE_WALLET
     paymentServer(0),
-    walletModel(0),
+    m_wallet_models(),
 #endif
     returnValue(0)
 {
@@ -392,7 +392,6 @@ void BitcoinApplication::createWindow(const NetworkStyle *networkStyle)
 
     pollShutdownTimer = new QTimer(window);
     connect(pollShutdownTimer, SIGNAL(timeout()), window, SLOT(detectShutdown()));
-    pollShutdownTimer->start(200);
 }
 
 void BitcoinApplication::createSplashScreen(const NetworkStyle *networkStyle)
@@ -454,8 +453,10 @@ void BitcoinApplication::requestShutdown()
 
 #ifdef ENABLE_WALLET
     window->removeAllWallets();
-    delete walletModel;
-    walletModel = 0;
+    for (WalletModel *walletModel : m_wallet_models) {
+        delete walletModel;
+    }
+    m_wallet_models.clear();
 #endif
     delete clientModel;
     clientModel = 0;
@@ -484,16 +485,20 @@ void BitcoinApplication::initializeResult(bool success)
         window->setClientModel(clientModel);
 
 #ifdef ENABLE_WALLET
-        // TODO: Expose secondary wallets
-        if (!vpwallets.empty())
-        {
-            walletModel = new WalletModel(platformStyle, vpwallets[0], optionsModel);
+        bool fFirstWallet = true;
+        for (CWalletRef pwallet : vpwallets) {
+            WalletModel * const walletModel = new WalletModel(platformStyle, pwallet, optionsModel);
 
-            window->addWallet(BitcoinGUI::DEFAULT_WALLET, walletModel);
-            window->setCurrentWallet(BitcoinGUI::DEFAULT_WALLET);
+            window->addWallet(walletModel);
+            if (fFirstWallet) {
+                window->setCurrentWallet(walletModel->getWalletName());
+                fFirstWallet = false;
+            }
 
             connect(walletModel, SIGNAL(coinsSent(CWallet*,SendCoinsRecipient,QByteArray)),
                              paymentServer, SLOT(fetchPaymentACK(CWallet*,const SendCoinsRecipient&,QByteArray)));
+
+            m_wallet_models.push_back(walletModel);
         }
 #endif
 
@@ -519,14 +524,16 @@ void BitcoinApplication::initializeResult(bool success)
                          window, SLOT(message(QString,QString,unsigned int)));
         QTimer::singleShot(100, paymentServer, SLOT(uiReady()));
 #endif
+        pollShutdownTimer->start(200);
     } else {
-        quit(); // Exit main loop
+        Q_EMIT splashFinished(window); // Make sure splash screen doesn't stick around during shutdown
+        quit(); // Exit first main loop invocation
     }
 }
 
 void BitcoinApplication::shutdownResult()
 {
-    quit(); // Exit main loop after shutdown finished
+    quit(); // Exit second main loop invocation after shutdown finished
 }
 
 void BitcoinApplication::handleRunawayException(const QString &message)
@@ -606,8 +613,7 @@ int main(int argc, char *argv[])
 
     // Show help message immediately after parsing command-line options (for "-lang") and setting locale,
     // but before showing splash screen.
-    if (gArgs.IsArgSet("-?") || gArgs.IsArgSet("-h") || gArgs.IsArgSet("-help") || gArgs.IsArgSet("-version"))
-    {
+    if (HelpRequested(gArgs) || gArgs.IsArgSet("-version")) {
         HelpMessageDialog help(nullptr, gArgs.IsArgSet("-version"));
         help.showOrPrint();
         return EXIT_SUCCESS;
@@ -618,7 +624,7 @@ int main(int argc, char *argv[])
     if (!Intro::pickDataDirectory())
         return EXIT_SUCCESS;
 
-    /// 6. Determine availability of data directory and parse bitcoin.conf
+    /// 6. Determine availability of data and blocks directory and parse bitcoin.conf
     /// - Do not call GetDataDir(true) before this step finishes
     if (!fs::is_directory(GetDataDir(false)))
     {
@@ -672,6 +678,11 @@ int main(int argc, char *argv[])
     // Start up the payment server early, too, so impatient users that click on
     // bitcoin: links repeatedly have their payment requests routed to this process:
     app.createPaymentServer();
+
+    // Hook up the wallet init interface
+    g_wallet_init_interface.reset(new WalletInit);
+#else
+    g_wallet_init_interface.reset(new DummyWalletInit);
 #endif
 
     /// 9. Main GUI initialization
@@ -691,7 +702,7 @@ int main(int argc, char *argv[])
     // Allow parameter interaction before we create the options model
     app.parameterSetup();
     // Load GUI settings from QSettings
-    app.createOptionsModel(gArgs.IsArgSet("-resetguisettings"));
+    app.createOptionsModel(gArgs.GetBoolArg("-resetguisettings", false));
 
     // Subscribe to global signals from core
     uiInterface.InitMessage.connect(InitMessage);

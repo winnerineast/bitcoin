@@ -25,6 +25,7 @@
 #include <map>
 #include <stdint.h>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/signals2/signal.hpp>
@@ -136,7 +137,7 @@ template<typename T, typename... Args> static inline void MarkUsed(const T& t, c
 
 // Be conservative when using LogPrintf/error or other things which
 // unconditionally log to debug.log! It should not be the case that an inbound
-// peer can fill up a users disk with debug.log entries.
+// peer can fill up a user's disk with debug.log entries.
 
 #ifdef USE_COVERAGE
 #define LogPrintf(...) do { MarkUsed(__VA_ARGS__); } while(0)
@@ -173,8 +174,17 @@ bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
 void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
 bool RenameOver(fs::path src, fs::path dest);
+bool LockDirectory(const fs::path& directory, const std::string lockfile_name, bool probe_only=false);
+bool DirIsWritable(const fs::path& directory);
+
+/** Release all directory locks. This is used for unit testing only, at runtime
+ * the global destructor will take care of the locks.
+ */
+void ReleaseDirectoryLocks();
+
 bool TryCreateDirectories(const fs::path& p);
 fs::path GetDefaultDataDir();
+const fs::path &GetBlocksDir(bool fNetSpecific = true);
 const fs::path &GetDataDir(bool fNetSpecific = true);
 void ClearDatadirCache();
 fs::path GetConfigFile(const std::string& confPath);
@@ -189,6 +199,16 @@ fs::path GetDebugLogPath();
 bool OpenDebugLog();
 void ShrinkDebugFile();
 void runCommand(const std::string& strCommand);
+
+/**
+ * Most paths passed as configuration arguments are treated as relative to
+ * the datadir if they are not absolute.
+ *
+ * @param path The path to be conditionally prefixed with datadir.
+ * @param net_specific Forwarded to GetDataDir().
+ * @return The normalized path.
+ */
+fs::path AbsPathForConfigVal(const fs::path& path, bool net_specific = true);
 
 inline bool IsSwitchChar(char c)
 {
@@ -205,6 +225,8 @@ protected:
     mutable CCriticalSection cs_args;
     std::map<std::string, std::string> mapArgs;
     std::map<std::string, std::vector<std::string>> mapMultiArgs;
+    std::unordered_set<std::string> m_negated_args;
+
 public:
     void ParseParameters(int argc, const char*const argv[]);
     void ReadConfigFile(const std::string& confPath);
@@ -224,6 +246,15 @@ public:
      * @return true if the argument has been set
      */
     bool IsArgSet(const std::string& strArg) const;
+
+    /**
+     * Return true if the argument was originally passed as a negated option,
+     * i.e. -nofoo.
+     *
+     * @param strArg Argument to get (e.g. "-foo")
+     * @return true if the argument was passed negated
+     */
+    bool IsArgNegated(const std::string& strArg) const;
 
     /**
      * Return string argument or default value
@@ -273,9 +304,19 @@ public:
     // Forces an arg setting. Called by SoftSetArg() if the arg hasn't already
     // been set. Also called directly in testing.
     void ForceSetArg(const std::string& strArg, const std::string& strValue);
+
+private:
+
+    // Munge -nofoo into -foo=0 and track the value as negated.
+    void InterpretNegatedOption(std::string &key, std::string &val);
 };
 
 extern ArgsManager gArgs;
+
+/**
+ * @return true if help has been requested via a command-line arg
+ */
+bool HelpRequested(const ArgsManager& args);
 
 /**
  * Format a string to be used as group of options in help messages
@@ -295,9 +336,8 @@ std::string HelpMessageGroup(const std::string& message);
 std::string HelpMessageOpt(const std::string& option, const std::string& message);
 
 /**
- * Return the number of physical cores available on the current system.
- * @note This does not count virtual cores, such as those provided by HyperThreading
- * when boost is newer than 1.56.
+ * Return the number of cores available on the current system.
+ * @note This does count virtual cores, such as those provided by HyperThreading.
  */
 int GetNumCores();
 

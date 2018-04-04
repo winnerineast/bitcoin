@@ -526,11 +526,9 @@ class CScript(bytes):
                     yield CScriptOp(opcode)
 
     def __repr__(self):
-        # For Python3 compatibility add b before strings so testcases don't
-        # need to change
         def _repr(o):
             if isinstance(o, bytes):
-                return b"x('%s')" % hexlify(o).decode('ascii')
+                return "x('%s')" % hexlify(o).decode('ascii')
             else:
                 return repr(o)
 
@@ -641,7 +639,7 @@ def SignatureHash(script, txTo, inIdx, hashtype):
         txtmp.vin = []
         txtmp.vin.append(tmp)
 
-    s = txtmp.serialize()
+    s = txtmp.serialize_without_witness()
     s += struct.pack(b"<I", hashtype)
 
     hash = hash256(s)

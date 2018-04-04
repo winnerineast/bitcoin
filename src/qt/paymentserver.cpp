@@ -8,9 +8,9 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 
-#include <base58.h>
 #include <chainparams.h>
 #include <policy/policy.h>
+#include <key_io.h>
 #include <ui_interface.h>
 #include <util.h>
 #include <wallet/wallet.h>
@@ -404,7 +404,12 @@ void PaymentServer::handleURIOrFile(const QString& s)
         return;
     }
 
-    if (s.startsWith(BITCOIN_IPC_PREFIX, Qt::CaseInsensitive)) // bitcoin: URI
+    if (s.startsWith("bitcoin://", Qt::CaseInsensitive))
+    {
+        Q_EMIT message(tr("URI handling"), tr("'bitcoin://' is not a valid URI. Use 'bitcoin:' instead."),
+            CClientUIInterface::MSG_ERROR);
+    }
+    else if (s.startsWith(BITCOIN_IPC_PREFIX, Qt::CaseInsensitive)) // bitcoin: URI
     {
 #if QT_VERSION < 0x050000
         QUrl uri(s);
@@ -634,29 +639,26 @@ void PaymentServer::fetchPaymentACK(CWallet* wallet, const SendCoinsRecipient& r
     payment.add_transactions(transaction.data(), transaction.size());
 
     // Create a new refund address, or re-use:
-    QString account = tr("Refund from %1").arg(recipient.authenticatedMerchant);
-    std::string strAccount = account.toStdString();
-    std::set<CTxDestination> refundAddresses = wallet->GetAccountAddresses(strAccount);
-    if (!refundAddresses.empty()) {
-        CScript s = GetScriptForDestination(*refundAddresses.begin());
+    CPubKey newKey;
+    if (wallet->GetKeyFromPool(newKey)) {
+        // BIP70 requests encode the scriptPubKey directly, so we are not restricted to address
+        // types supported by the receiver. As a result, we choose the address format we also
+        // use for change. Despite an actual payment and not change, this is a close match:
+        // it's the output type we use subject to privacy issues, but not restricted by what
+        // other software supports.
+        const OutputType change_type = wallet->m_default_change_type != OutputType::NONE ? wallet->m_default_change_type : wallet->m_default_address_type;
+        wallet->LearnRelatedScripts(newKey, change_type);
+        CTxDestination dest = GetDestinationForKey(newKey, change_type);
+        std::string label = tr("Refund from %1").arg(recipient.authenticatedMerchant).toStdString();
+        wallet->SetAddressBook(dest, label, "refund");
+
+        CScript s = GetScriptForDestination(dest);
         payments::Output* refund_to = payment.add_refund_to();
         refund_to->set_script(&s[0], s.size());
-    }
-    else {
-        CPubKey newKey;
-        if (wallet->GetKeyFromPool(newKey)) {
-            CKeyID keyID = newKey.GetID();
-            wallet->SetAddressBook(keyID, strAccount, "refund");
-
-            CScript s = GetScriptForDestination(keyID);
-            payments::Output* refund_to = payment.add_refund_to();
-            refund_to->set_script(&s[0], s.size());
-        }
-        else {
-            // This should never happen, because sending coins should have
-            // just unlocked the wallet and refilled the keypool.
-            qWarning() << "PaymentServer::fetchPaymentACK: Error getting refund key, refund_to not set";
-        }
+    } else {
+        // This should never happen, because sending coins should have
+        // just unlocked the wallet and refilled the keypool.
+        qWarning() << "PaymentServer::fetchPaymentACK: Error getting refund key, refund_to not set";
     }
 
     int length = payment.ByteSize();
@@ -772,7 +774,7 @@ bool PaymentServer::verifyExpired(const payments::PaymentDetails& requestDetails
 {
     bool fVerified = (requestDetails.has_expires() && (int64_t)requestDetails.expires() < GetTime());
     if (fVerified) {
-        const QString requestExpires = QString::fromStdString(DateTimeStrFormat("%Y-%m-%d %H:%M:%S", (int64_t)requestDetails.expires()));
+        const QString requestExpires = QString::fromStdString(FormatISO8601DateTime((int64_t)requestDetails.expires()));
         qWarning() << QString("PaymentServer::%1: Payment request expired \"%2\".")
             .arg(__func__)
             .arg(requestExpires);

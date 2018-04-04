@@ -14,11 +14,14 @@
 #include <rpc/server.h>
 #include <init.h>
 #include <noui.h>
-#include <scheduler.h>
 #include <util.h>
 #include <httpserver.h>
 #include <httprpc.h>
 #include <utilstrencodings.h>
+#if ENABLE_WALLET
+#include <wallet/init.h>
+#endif
+#include <walletinitinterface.h>
 
 #include <boost/thread.hpp>
 
@@ -40,7 +43,7 @@
  * Use the buttons <code>Namespaces</code>, <code>Classes</code> or <code>Files</code> at the top of the page to start navigating the code.
  */
 
-void WaitForShutdown(boost::thread_group* threadGroup)
+void WaitForShutdown()
 {
     bool fShutdown = ShutdownRequested();
     // Tell the main threads to shutdown.
@@ -49,11 +52,7 @@ void WaitForShutdown(boost::thread_group* threadGroup)
         MilliSleep(200);
         fShutdown = ShutdownRequested();
     }
-    if (threadGroup)
-    {
-        Interrupt(*threadGroup);
-        threadGroup->join_all();
-    }
+    Interrupt();
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -62,10 +61,13 @@ void WaitForShutdown(boost::thread_group* threadGroup)
 //
 bool AppInit(int argc, char* argv[])
 {
-    boost::thread_group threadGroup;
-    CScheduler scheduler;
-
     bool fRet = false;
+
+#if ENABLE_WALLET
+    g_wallet_init_interface.reset(new WalletInit);
+#else
+    g_wallet_init_interface.reset(new DummyWalletInit);
+#endif
 
     //
     // Parameters
@@ -74,8 +76,7 @@ bool AppInit(int argc, char* argv[])
     gArgs.ParseParameters(argc, argv);
 
     // Process help and version before taking care about datadir
-    if (gArgs.IsArgSet("-?") || gArgs.IsArgSet("-h") ||  gArgs.IsArgSet("-help") || gArgs.IsArgSet("-version"))
-    {
+    if (HelpRequested(gArgs) || gArgs.IsArgSet("-version")) {
         std::string strUsage = strprintf(_("%s Daemon"), _(PACKAGE_NAME)) + " " + _("version") + " " + FormatFullVersion() + "\n";
 
         if (gArgs.IsArgSet("-version"))
@@ -87,7 +88,7 @@ bool AppInit(int argc, char* argv[])
             strUsage += "\n" + _("Usage:") + "\n" +
                   "  bitcoind [options]                     " + strprintf(_("Start %s Daemon"), _(PACKAGE_NAME)) + "\n";
 
-            strUsage += "\n" + HelpMessage(HMM_BITCOIND);
+            strUsage += "\n" + HelpMessage(HelpMessageMode::BITCOIND);
         }
 
         fprintf(stdout, "%s", strUsage.c_str());
@@ -165,7 +166,7 @@ bool AppInit(int argc, char* argv[])
             // If locking the data directory failed, exit immediately
             return false;
         }
-        fRet = AppInitMain(threadGroup, scheduler);
+        fRet = AppInitMain();
     }
     catch (const std::exception& e) {
         PrintExceptionContinue(&e, "AppInit()");
@@ -175,10 +176,9 @@ bool AppInit(int argc, char* argv[])
 
     if (!fRet)
     {
-        Interrupt(threadGroup);
-        threadGroup.join_all();
+        Interrupt();
     } else {
-        WaitForShutdown(&threadGroup);
+        WaitForShutdown();
     }
     Shutdown();
 
