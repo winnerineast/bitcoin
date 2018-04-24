@@ -15,6 +15,7 @@
 #include <util.h>
 #include <utilstrencodings.h>
 
+#include <memory>
 #include <stdio.h>
 
 #include <event2/buffer.h>
@@ -113,7 +114,7 @@ static int AppInitRPC(int argc, char* argv[])
     }
     // Check for -testnet or -regtest parameter (BaseParams() calls are only valid after this clause)
     try {
-        SelectBaseParams(ChainNameFromCommandLine());
+        SelectBaseParams(gArgs.GetChainName());
     } catch (const std::exception& e) {
         fprintf(stderr, "Error: %s\n", e.what());
         return EXIT_FAILURE;

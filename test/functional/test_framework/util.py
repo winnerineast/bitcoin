@@ -294,6 +294,7 @@ def initialize_datadir(dirname, n):
         os.makedirs(datadir)
     with open(os.path.join(datadir, "bitcoin.conf"), 'w', encoding='utf8') as f:
         f.write("regtest=1\n")
+        f.write("[regtest]\n")
         f.write("port=" + str(p2p_port(n)) + "\n")
         f.write("rpcport=" + str(rpc_port(n)) + "\n")
         f.write("server=1\n")
@@ -331,6 +332,12 @@ def get_auth_cookie(datadir):
     if user is None or password is None:
         raise ValueError("No RPC credentials")
     return user, password
+
+# If a cookie file exists in the given datadir, delete it.
+def delete_cookie_file(datadir):
+    if os.path.isfile(os.path.join(datadir, "regtest", ".cookie")):
+        logger.debug("Deleting leftover cookie file")
+        os.remove(os.path.join(datadir, "regtest", ".cookie"))
 
 def get_bip9_status(node, key):
     info = node.getblockchaininfo()

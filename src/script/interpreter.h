@@ -129,6 +129,10 @@ enum class SigVersion
     WITNESS_V0 = 1,
 };
 
+/** Signature hash sizes */
+static constexpr size_t WITNESS_V0_SCRIPTHASH_SIZE = 32;
+static constexpr size_t WITNESS_V0_KEYHASH_SIZE = 20;
+
 uint256 SignatureHash(const CScript &scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, const CAmount& amount, SigVersion sigversion, const PrecomputedTransactionData* cache = nullptr);
 
 class BaseSignatureChecker
@@ -184,5 +188,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
 bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const CScriptWitness* witness, unsigned int flags, const BaseSignatureChecker& checker, ScriptError* serror = nullptr);
 
 size_t CountWitnessSigOps(const CScript& scriptSig, const CScript& scriptPubKey, const CScriptWitness* witness, unsigned int flags);
+
+int FindAndDelete(CScript& script, const CScript& b);
 
 #endif // BITCOIN_SCRIPT_INTERPRETER_H

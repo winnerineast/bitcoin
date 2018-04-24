@@ -3,18 +3,53 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <wallet/init.h>
-
 #include <chainparams.h>
+#include <init.h>
 #include <net.h>
 #include <util.h>
 #include <utilmoneystr.h>
 #include <validation.h>
+#include <walletinitinterface.h>
 #include <wallet/rpcwallet.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
 
-std::string WalletInit::GetHelpString(bool showDebug)
+class WalletInit : public WalletInitInterface {
+public:
+
+    //! Return the wallets help message.
+    std::string GetHelpString(bool showDebug) const override;
+
+    //! Wallets parameter interaction
+    bool ParameterInteraction() const override;
+
+    //! Register wallet RPCs.
+    void RegisterRPC(CRPCTable &tableRPC) const override;
+
+    //! Responsible for reading and validating the -wallet arguments and verifying the wallet database.
+    //  This function will perform salvage on the wallet if requested, as long as only one wallet is
+    //  being loaded (WalletParameterInteraction forbids -salvagewallet, -zapwallettxes or -upgradewallet with multiwallet).
+    bool Verify() const override;
+
+    //! Load wallet databases.
+    bool Open() const override;
+
+    //! Complete startup of wallets.
+    void Start(CScheduler& scheduler) const override;
+
+    //! Flush all wallets in preparation for shutdown.
+    void Flush() const override;
+
+    //! Stop all wallets. Wallets will be flushed first.
+    void Stop() const override;
+
+    //! Close all wallets.
+    void Close() const override;
+};
+
+const WalletInitInterface& g_wallet_init_interface = WalletInit();
+
+std::string WalletInit::GetHelpString(bool showDebug) const
 {
     std::string strUsage = HelpMessageGroup(_("Wallet options:"));
     strUsage += HelpMessageOpt("-addresstype", strprintf("What type of addresses to use (\"legacy\", \"p2sh-segwit\", or \"bech32\", default: \"%s\")", FormatOutputType(DEFAULT_ADDRESS_TYPE)));
@@ -56,7 +91,7 @@ std::string WalletInit::GetHelpString(bool showDebug)
     return strUsage;
 }
 
-bool WalletInit::ParameterInteraction()
+bool WalletInit::ParameterInteraction() const
 {
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         for (const std::string& wallet : gArgs.GetArgs("-wallet")) {
@@ -83,19 +118,19 @@ bool WalletInit::ParameterInteraction()
         }
     }
 
-    int zapwallettxes = gArgs.GetArg("-zapwallettxes", 0);
+    bool zapwallettxes = gArgs.GetBoolArg("-zapwallettxes", false);
     // -zapwallettxes implies dropping the mempool on startup
-    if (zapwallettxes != 0 && gArgs.SoftSetBoolArg("-persistmempool", false)) {
-        LogPrintf("%s: parameter interaction: -zapwallettxes=%s -> setting -persistmempool=0\n", __func__, zapwallettxes);
+    if (zapwallettxes && gArgs.SoftSetBoolArg("-persistmempool", false)) {
+        LogPrintf("%s: parameter interaction: -zapwallettxes enabled -> setting -persistmempool=0\n", __func__);
     }
 
     // -zapwallettxes implies a rescan
-    if (zapwallettxes != 0) {
+    if (zapwallettxes) {
         if (is_multiwallet) {
             return InitError(strprintf("%s is only allowed with a single wallet file", "-zapwallettxes"));
         }
         if (gArgs.SoftSetBoolArg("-rescan", true)) {
-            LogPrintf("%s: parameter interaction: -zapwallettxes=%s -> setting -rescan=1\n", __func__, zapwallettxes);
+            LogPrintf("%s: parameter interaction: -zapwallettxes enabled -> setting -rescan=1\n", __func__);
         }
     }
 
@@ -184,7 +219,7 @@ bool WalletInit::ParameterInteraction()
     return true;
 }
 
-void WalletInit::RegisterRPC(CRPCTable &t)
+void WalletInit::RegisterRPC(CRPCTable &t) const
 {
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         return;
@@ -193,7 +228,7 @@ void WalletInit::RegisterRPC(CRPCTable &t)
     RegisterWalletRPCCommands(t);
 }
 
-bool WalletInit::Verify()
+bool WalletInit::Verify() const
 {
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         return true;
@@ -241,21 +276,21 @@ bool WalletInit::Verify()
         }
 
         std::string strError;
-        if (!CWalletDB::VerifyEnvironment(wallet_path, strError)) {
+        if (!WalletBatch::VerifyEnvironment(wallet_path, strError)) {
             return InitError(strError);
         }
 
         if (gArgs.GetBoolArg("-salvagewallet", false)) {
             // Recover readable keypairs:
-            CWallet dummyWallet("dummy", CWalletDBWrapper::CreateDummy());
+            CWallet dummyWallet("dummy", WalletDatabase::CreateDummy());
             std::string backup_filename;
-            if (!CWalletDB::Recover(wallet_path, (void *)&dummyWallet, CWalletDB::RecoverKeysOnlyFilter, backup_filename)) {
+            if (!WalletBatch::Recover(wallet_path, (void *)&dummyWallet, WalletBatch::RecoverKeysOnlyFilter, backup_filename)) {
                 return false;
             }
         }
 
         std::string strWarning;
-        bool dbV = CWalletDB::VerifyDatabaseFile(wallet_path, strWarning, strError);
+        bool dbV = WalletBatch::VerifyDatabaseFile(wallet_path, strWarning, strError);
         if (!strWarning.empty()) {
             InitWarning(strWarning);
         }
@@ -268,7 +303,7 @@ bool WalletInit::Verify()
     return true;
 }
 
-bool WalletInit::Open()
+bool WalletInit::Open() const
 {
     if (gArgs.GetBoolArg("-disablewallet", DEFAULT_DISABLE_WALLET)) {
         LogPrintf("Wallet disabled!\n");
@@ -280,37 +315,37 @@ bool WalletInit::Open()
         if (!pwallet) {
             return false;
         }
-        vpwallets.push_back(pwallet);
+        AddWallet(pwallet);
     }
 
     return true;
 }
 
-void WalletInit::Start(CScheduler& scheduler)
+void WalletInit::Start(CScheduler& scheduler) const
 {
-    for (CWalletRef pwallet : vpwallets) {
+    for (CWallet* pwallet : GetWallets()) {
         pwallet->postInitProcess(scheduler);
     }
 }
 
-void WalletInit::Flush()
+void WalletInit::Flush() const
 {
-    for (CWalletRef pwallet : vpwallets) {
+    for (CWallet* pwallet : GetWallets()) {
         pwallet->Flush(false);
     }
 }
 
-void WalletInit::Stop()
+void WalletInit::Stop() const
 {
-    for (CWalletRef pwallet : vpwallets) {
+    for (CWallet* pwallet : GetWallets()) {
         pwallet->Flush(true);
     }
 }
 
-void WalletInit::Close()
+void WalletInit::Close() const
 {
-    for (CWalletRef pwallet : vpwallets) {
+    for (CWallet* pwallet : GetWallets()) {
+        RemoveWallet(pwallet);
         delete pwallet;
     }
-    vpwallets.clear();
 }

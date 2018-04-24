@@ -47,7 +47,6 @@
 #include <walletinitinterface.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <memory>
 
 #ifndef WIN32
 #include <signal.h>
@@ -72,7 +71,24 @@ static const bool DEFAULT_STOPAFTERBLOCKIMPORT = false;
 
 std::unique_ptr<CConnman> g_connman;
 std::unique_ptr<PeerLogicValidation> peerLogic;
-std::unique_ptr<WalletInitInterface> g_wallet_init_interface;
+
+#if !(ENABLE_WALLET)
+class DummyWalletInit : public WalletInitInterface {
+public:
+
+    std::string GetHelpString(bool showDebug) const override {return std::string{};}
+    bool ParameterInteraction() const override {return true;}
+    void RegisterRPC(CRPCTable &) const override {}
+    bool Verify() const override {return true;}
+    bool Open() const override {LogPrintf("No wallet support compiled in!\n"); return true;}
+    void Start(CScheduler& scheduler) const override {}
+    void Flush() const override {}
+    void Stop() const override {}
+    void Close() const override {}
+};
+
+const WalletInitInterface& g_wallet_init_interface = DummyWalletInit();
+#endif
 
 #if ENABLE_ZMQ
 static CZMQNotificationInterface* pzmqNotificationInterface = nullptr;
@@ -187,7 +203,7 @@ void Shutdown()
     StopREST();
     StopRPC();
     StopHTTPServer();
-    g_wallet_init_interface->Flush();
+    g_wallet_init_interface.Flush();
     StopMapPort();
 
     // Because these depend on each-other, we make sure that neither can be
@@ -245,7 +261,7 @@ void Shutdown()
         pcoinsdbview.reset();
         pblocktree.reset();
     }
-    g_wallet_init_interface->Stop();
+    g_wallet_init_interface.Stop();
 
 #if ENABLE_ZMQ
     if (pzmqNotificationInterface) {
@@ -265,8 +281,7 @@ void Shutdown()
     UnregisterAllValidationInterfaces();
     GetMainSignals().UnregisterBackgroundSignalScheduler();
     GetMainSignals().UnregisterWithMempoolSignals(mempool);
-    g_wallet_init_interface->Close();
-    g_wallet_init_interface.reset();
+    g_wallet_init_interface.Close();
     globalVerifyHandle.reset();
     ECC_Stop();
     LogPrintf("%s: done\n", __func__);
@@ -307,7 +322,7 @@ void OnRPCStopped()
 {
     uiInterface.NotifyBlockTip.disconnect(&RPCNotifyBlockChange);
     RPCNotifyBlockChange(false, nullptr);
-    cvBlockChange.notify_all();
+    g_best_block_cv.notify_all();
     LogPrint(BCLog::RPC, "RPC stopped.\n");
 }
 
@@ -409,7 +424,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-whitelist=<IP address or network>", _("Whitelist peers connecting from the given IP address (e.g. 1.2.3.4) or CIDR notated network (e.g. 1.2.3.0/24). Can be specified multiple times.") +
         " " + _("Whitelisted peers cannot be DoS banned and their transactions are always relayed, even if they are already in the mempool, useful e.g. for a gateway"));
 
-    strUsage += g_wallet_init_interface->GetHelpString(showDebug);
+    strUsage += g_wallet_init_interface.GetHelpString(showDebug);
 
 #if ENABLE_ZMQ
     strUsage += HelpMessageGroup(_("ZeroMQ notification options:"));
@@ -615,6 +630,7 @@ void ThreadImport(std::vector<fs::path> vImportFiles)
 {
     const CChainParams& chainparams = Params();
     RenameThread("bitcoin-loadblk");
+    ScheduleBatchPriority();
 
     {
     CImportingNow imp;
@@ -668,7 +684,7 @@ void ThreadImport(std::vector<fs::path> vImportFiles)
     // scan for better chains in the block chain database, that are not yet connected in the active best chain
     CValidationState state;
     if (!ActivateBestChain(state, chainparams)) {
-        LogPrintf("Failed to connect best block");
+        LogPrintf("Failed to connect best block (%s)\n", FormatStateMessage(state));
         StartShutdown();
         return;
     }
@@ -786,6 +802,11 @@ void InitParameterInteraction()
         if (gArgs.SoftSetBoolArg("-whitelistrelay", true))
             LogPrintf("%s: parameter interaction: -whitelistforcerelay=1 -> setting -whitelistrelay=1\n", __func__);
     }
+
+    // Warn if network-specific options (-addnode, -connect, etc) are
+    // specified in default section of config file, but not overridden
+    // on the command line or in this network's section of the config file.
+    gArgs.WarnForSectionOnlyArgs();
 }
 
 static std::string ResolveErrMsg(const char * const optname, const std::string& strBind)
@@ -793,14 +814,25 @@ static std::string ResolveErrMsg(const char * const optname, const std::string& 
     return strprintf(_("Cannot resolve -%s address: '%s'"), optname, strBind);
 }
 
+/**
+ * Initialize global loggers.
+ *
+ * Note that this is called very early in the process lifetime, so you should be
+ * careful about what global state you rely on here.
+ */
 void InitLogging()
 {
-    fPrintToConsole = gArgs.GetBoolArg("-printtoconsole", false);
+    // Add newlines to the logfile to distinguish this execution from the last
+    // one; called before console logging is set up, so this is only sent to
+    // debug.log.
+    LogPrintf("\n\n\n\n\n");
+
+    fPrintToConsole = gArgs.GetBoolArg("-printtoconsole", !gArgs.GetBoolArg("-daemon", false));
+    fPrintToDebugLog = !gArgs.IsArgNegated("-debuglogfile");
     fLogTimestamps = gArgs.GetBoolArg("-logtimestamps", DEFAULT_LOGTIMESTAMPS);
     fLogTimeMicros = gArgs.GetBoolArg("-logtimemicros", DEFAULT_LOGTIMEMICROS);
     fLogIPs = gArgs.GetBoolArg("-logips", DEFAULT_LOGIPS);
 
-    LogPrintf("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
     std::string version_string = FormatFullVersion();
 #ifdef DEBUG
     version_string += " (debug build)";
@@ -1076,7 +1108,7 @@ bool AppInitParameterInteraction()
         return InitError(strprintf("acceptnonstdtxn is not currently supported for %s chain", chainparams.NetworkIDString()));
     nBytesPerSigOp = gArgs.GetArg("-bytespersigop", nBytesPerSigOp);
 
-    if (!g_wallet_init_interface->ParameterInteraction()) return false;
+    if (!g_wallet_init_interface.ParameterInteraction()) return false;
 
     fIsBareMultisigStd = gArgs.GetBoolArg("-permitbaremultisig", DEFAULT_PERMIT_BAREMULTISIG);
     fAcceptDatacarrier = gArgs.GetBoolArg("-datacarrier", DEFAULT_ACCEPT_DATACARRIER);
@@ -1194,13 +1226,12 @@ bool AppInitMain()
 #ifndef WIN32
     CreatePidFile(GetPidFile(), getpid());
 #endif
-    if (gArgs.GetBoolArg("-shrinkdebugfile", logCategories == BCLog::NONE)) {
-        // Do this first since it both loads a bunch of debug.log into memory,
-        // and because this needs to happen before any other debug.log printing
-        ShrinkDebugFile();
-    }
-
     if (fPrintToDebugLog) {
+        if (gArgs.GetBoolArg("-shrinkdebugfile", logCategories == BCLog::NONE)) {
+            // Do this first since it both loads a bunch of debug.log into memory,
+            // and because this needs to happen before any other debug.log printing
+            ShrinkDebugFile();
+        }
         if (!OpenDebugLog()) {
             return InitError(strprintf("Could not open debug log file %s", GetDebugLogPath().string()));
         }
@@ -1215,7 +1246,7 @@ bool AppInitMain()
 
     // Warn about relative -datadir path.
     if (gArgs.IsArgSet("-datadir") && !fs::path(gArgs.GetArg("-datadir", "")).is_absolute()) {
-        LogPrintf("Warning: relative datadir option '%s' specified, which will be interpreted relative to the "
+        LogPrintf("Warning: relative datadir option '%s' specified, which will be interpreted relative to the " /* Continued */
                   "current working directory '%s'. This is fragile, because if bitcoin is started in the future "
                   "from a different location, it will be unable to locate the current data files. There could "
                   "also be data loss if bitcoin is started while in a temporary directory.\n",
@@ -1242,7 +1273,7 @@ bool AppInitMain()
      * available in the GUI RPC console even if external calls are disabled.
      */
     RegisterAllCoreRPCCommands(tableRPC);
-    g_wallet_init_interface->RegisterRPC(tableRPC);
+    g_wallet_init_interface.RegisterRPC(tableRPC);
 
     /* Start the RPC server already.  It will be started in "warmup" mode
      * and not really process calls already (but it will signify connections
@@ -1259,7 +1290,7 @@ bool AppInitMain()
     int64_t nStart;
 
     // ********************************************************* Step 5: verify wallet database integrity
-    if (!g_wallet_init_interface->Verify()) return false;
+    if (!g_wallet_init_interface.Verify()) return false;
 
     // ********************************************************* Step 6: network initialization
     // Note that we absolutely cannot open any actual connections
@@ -1578,7 +1609,7 @@ bool AppInitMain()
     fFeeEstimatesInitialized = true;
 
     // ********************************************************* Step 8: load wallet
-    if (!g_wallet_init_interface->Open()) return false;
+    if (!g_wallet_init_interface.Open()) return false;
 
     // ********************************************************* Step 9: data directory maintenance
 
@@ -1724,7 +1755,7 @@ bool AppInitMain()
     SetRPCWarmupFinished();
     uiInterface.InitMessage(_("Done loading"));
 
-    g_wallet_init_interface->Start(scheduler);
+    g_wallet_init_interface.Start(scheduler);
 
     return true;
 }
