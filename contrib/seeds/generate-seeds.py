@@ -11,7 +11,7 @@ argument:
     nodes_main.txt
     nodes_test.txt
 
-These files must consist of lines in the format 
+These files must consist of lines in the format
 
     <ip>
     <ip>:<port>
@@ -74,7 +74,7 @@ def name_to_ipv6(addr):
         raise ValueError('Could not parse address %s' % addr)
 
 def parse_spec(s, defaultport):
-    match = re.match('\[([0-9a-fA-F:]+)\](?::([0-9]+))?$', s)
+    match = re.match(r'\[([0-9a-fA-F:]+)\](?::([0-9]+))?$', s)
     if match: # ipv6
         host = match.group(1)
         port = match.group(2)
@@ -127,13 +127,12 @@ def main():
     g.write(' * Each line contains a 16-byte IPv6 address and a port.\n')
     g.write(' * IPv4 as well as onion addresses are wrapped inside an IPv6 address accordingly.\n')
     g.write(' */\n')
-    with open(os.path.join(indir,'nodes_main.txt'),'r') as f:
+    with open(os.path.join(indir,'nodes_main.txt'), 'r', encoding="utf8") as f:
         process_nodes(g, f, 'pnSeed6_main', 8333)
     g.write('\n')
-    with open(os.path.join(indir,'nodes_test.txt'),'r') as f:
+    with open(os.path.join(indir,'nodes_test.txt'), 'r', encoding="utf8") as f:
         process_nodes(g, f, 'pnSeed6_test', 18333)
     g.write('#endif // BITCOIN_CHAINPARAMSSEEDS_H\n')
 
 if __name__ == '__main__':
     main()
-
